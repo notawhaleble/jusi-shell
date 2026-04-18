@@ -198,6 +198,7 @@ class ShellRuntime:
         self._cwd_lock = threading.Lock()
         self._current_cwd: str | None = None
         self._socket_thread: threading.Thread | None = None
+        self._frontend_actions_path = str(os.environ.get("JUSI_PLUGIN_FRONTEND_ACTIONS_FILE", "")).strip()
 
     def _shell_base(self) -> str:
         return os.path.basename(self.argv[0])
@@ -219,20 +220,70 @@ class ShellRuntime:
             env["ZDOTDIR"] = self._cwd_state_dir
         return env
 
-    def _socket_client_command(self) -> str:
+    def _socket_client_command(self, python_code: str) -> str:
+        return f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)} >/dev/null 2>&1"
+
+    def _cwd_socket_command(self) -> str:
         python_code = (
             'import json, os, socket; '
             + f's=socket.socket(socket.AF_UNIX); s.connect({self._socket_path!r}); '
             + 'payload=(json.dumps({"type":"cwd","cwd":os.getcwd()}) + "\\n").encode(); '
             + 's.sendall(payload); s.close()'
         )
-        return f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)} >/dev/null 2>&1"
+        return self._socket_client_command(python_code)
+
+    def _open_path_socket_command(self) -> str:
+        python_code = (
+            'import json, os, socket; '
+            + f's=socket.socket(socket.AF_UNIX); s.connect({self._socket_path!r}); '
+            + 'payload=(json.dumps({"type":"open_path","path":os.environ.get("JUSI_OPEN_PATH", ""),"open_in":os.environ.get("JUSI_OPEN_IN", "split")}) + "\\n").encode(); '
+            + 's.sendall(payload); s.close()'
+        )
+        return self._socket_client_command(python_code)
+
+    def _bash_open_helper(self) -> str:
+        command = self._open_path_socket_command()
+        return '\n'.join([
+            'function jusi-open() {',
+            '  local open_in="split"',
+            '  case "$1" in',
+            '    -t|--tab) open_in="tab"; shift ;;',
+            '  esac',
+            '  [ $# -ge 1 ] || return 1',
+            f'  JUSI_OPEN_PATH="$1" JUSI_OPEN_IN="$open_in" {command}',
+            '}',
+        ])
+
+    def _zsh_open_helper(self) -> str:
+        command = self._open_path_socket_command()
+        return '\n'.join([
+            'function jusi-open() {',
+            '  local open_in="split"',
+            '  case "$1" in',
+            '    -t|--tab) open_in="tab"; shift ;;',
+            '  esac',
+            '  [[ $# -ge 1 ]] || return 1',
+            f'  JUSI_OPEN_PATH="$1" JUSI_OPEN_IN="$open_in" {command}',
+            '}',
+        ])
+
+    def _fish_open_helper(self) -> str:
+        command = self._open_path_socket_command()
+        return (
+            'function jusi-open; '
+            + 'set -l open_in split; '
+            + 'if test (count $argv) -gt 0; switch $argv[1]; case -t --tab; set open_in tab; set -e argv[1]; end; end; '
+            + 'if test (count $argv) -lt 1; return 1; end; '
+            + f'env JUSI_OPEN_PATH="$argv[1]" JUSI_OPEN_IN="$open_in" {command}; '
+            + 'end'
+        )
 
     def _write_bash_rcfile(self) -> str:
         home_rc = os.path.expanduser("~/.bashrc")
-        client_command = self._socket_client_command()
+        client_command = self._cwd_socket_command()
         payload = [
             'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi',
+            self._bash_open_helper(),
             'function __jusi_emit_cwd() { ' + client_command + '; }',
             'PROMPT_COMMAND="__jusi_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"',
             '__jusi_emit_cwd',
@@ -244,9 +295,10 @@ class ShellRuntime:
         return self._bash_rcfile
 
     def _write_zsh_rcfile(self) -> str:
-        client_command = self._socket_client_command()
+        client_command = self._cwd_socket_command()
         payload = [
             'if [ -f "$HOME/.zshrc" ]; then . "$HOME/.zshrc"; fi',
+            self._zsh_open_helper(),
             'autoload -Uz add-zsh-hook',
             'function __jusi_emit_cwd() { ' + client_command + '; }',
             'add-zsh-hook precmd __jusi_emit_cwd',
@@ -257,9 +309,10 @@ class ShellRuntime:
         return self._zsh_rcfile
 
     def _fish_init_command(self) -> str:
-        client_command = self._socket_client_command()
+        client_command = self._cwd_socket_command()
         return (
-            'function __jusi_emit_cwd --on-event fish_prompt; ' + client_command + '; end; __jusi_emit_cwd'
+            self._fish_open_helper()
+            + '; function __jusi_emit_cwd --on-event fish_prompt; ' + client_command + '; end; __jusi_emit_cwd'
         )
 
     def current_cwd(self) -> str | None:
@@ -271,6 +324,22 @@ class ShellRuntime:
         with self._cwd_lock:
             self._current_cwd = normalized
         _debug_log("cwd.update", cwd=normalized)
+
+    def _enqueue_frontend_action(self, action_type: str, payload: dict[str, Any]) -> None:
+        if not self._frontend_actions_path:
+            _debug_log("frontend_action.missing_sink", action_type=action_type)
+            return
+        record = {"action_type": action_type, "payload": dict(payload)}
+        with open(self._frontend_actions_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        _debug_log("frontend_action.queued", action_type=action_type, payload=payload)
+
+    def _resolve_open_path(self, raw_path: str) -> str:
+        candidate = Path(raw_path).expanduser()
+        if candidate.is_absolute():
+            return str(candidate)
+        cwd = self.current_cwd() or os.getcwd()
+        return str((Path(cwd) / candidate).resolve())
 
     def _start_socket_server(self) -> None:
         if os.path.exists(self._socket_path):
@@ -306,8 +375,24 @@ class ShellRuntime:
                         continue
                     if not isinstance(message, dict):
                         continue
-                    if str(message.get("type", "")).strip() == "cwd":
+                    message_type = str(message.get("type", "")).strip()
+                    if message_type == "cwd":
                         self._update_cwd(str(message.get("cwd", "")))
+                        continue
+                    if message_type == "open_path":
+                        raw_path = str(message.get("path", "")).strip()
+                        if not raw_path:
+                            continue
+                        open_in = str(message.get("open_in", "split")).strip() or "split"
+                        if open_in not in {"split", "tab"}:
+                            open_in = "split"
+                        self._enqueue_frontend_action(
+                            "open_path",
+                            {
+                                "path": self._resolve_open_path(raw_path),
+                                "open_in": open_in,
+                            },
+                        )
             finally:
                 server.close()
 
