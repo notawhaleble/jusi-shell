@@ -115,5 +115,6 @@ def display_handler_specs() -> tuple[DisplayHandlerSpec, ...]:
             factory=ShellHandler,
             magic_commands=(MagicCommand("shell"),),
             kernel_extension_modules=("jusi_shell.kernel",),
+            presentation={"syntax": "sh", "indent": "sh", "followup": True, "completion": True},
         ),
     )
