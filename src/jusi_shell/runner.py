@@ -285,7 +285,12 @@ class ShellRuntime:
             'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi',
             self._bash_open_helper(),
             'function __jusi_emit_cwd() { ' + client_command + '; }',
-            'PROMPT_COMMAND="__jusi_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"',
+            'shopt -s promptvars >/dev/null 2>&1 || true',
+            "__jusi_prompt_hook='$(__jusi_emit_cwd)'",
+            'case "$PS1" in',
+            '  *"$__jusi_prompt_hook"*) ;;',
+            '  *) PS1="$__jusi_prompt_hook$PS1" ;;',
+            'esac',
             '__jusi_emit_cwd',
         ]
         if not os.path.exists(home_rc):
