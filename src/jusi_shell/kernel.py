@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import shlex
 from typing import Any
 
 from IPython.core.error import UsageError
 
 from jusi.domain.models import JUSI_HANDLER_HANDOFF_MIME
+from jusi.infrastructure.runtime import JUSI_SESSION_CONFIG_ENV
+
+from .config import default_shell_from_config, shell_config_from_session
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -29,20 +34,35 @@ def load_ipython_extension(ipython: Any) -> None:
         from IPython.display import display
 
         args = _parser().parse_args(shlex.split(line))
+        session_config = _session_config_from_env()
         shell_name = str(args.shell_name or "").strip()
+        if not shell_name:
+            shell_name = default_shell_from_config(shell_config_from_session(session_config))
+        meta = {
+            "shell": shell_name,
+            "line": line,
+        }
         payload = {
             "handler_id": "shell",
             "magic_name": "shell",
             "content": str(cell or ""),
-            "meta": {
-                "shell": shell_name,
-                "line": line,
-            },
+            "meta": meta,
         }
         display(
             {JUSI_HANDLER_HANDOFF_MIME: payload},
             raw=True,
-            metadata={JUSI_HANDLER_HANDOFF_MIME: {"shell": shell_name, "line": line}},
+            metadata={JUSI_HANDLER_HANDOFF_MIME: meta},
         )
 
     ipython.register_magic_function(_jusi_shell_magic, magic_kind="cell", magic_name="shell")
+
+
+def _session_config_from_env() -> dict[str, object]:
+    raw = os.environ.get(JUSI_SESSION_CONFIG_ENV, "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}

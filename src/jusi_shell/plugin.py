@@ -10,6 +10,19 @@ from jusi.plugins import BaseTerminalHandler, DisplayHandlerSpec, HandlerContext
 
 
 SUPPORTED_MAGIC_PREFIXES = ("%%shell",)
+SHELL_BOOTSTRAP_BODY = ":"
+_TERMINAL_ENV_ALLOWLIST = {
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+    "VIRTUAL_ENV",
+}
 
 
 def _strip_shell_header(cell_text: str) -> str:
@@ -27,6 +40,11 @@ class ShellHandler(BaseTerminalHandler):
 
     def handler_id(self) -> str:
         return "shell"
+
+    @staticmethod
+    def bootstrap_cell_body(first_line: str) -> str | None:
+        _ = first_line
+        return SHELL_BOOTSTRAP_BODY
 
     def handle(self, context: HandlerContext, cell: ExecutableCell) -> str:
         self.stop()
@@ -68,7 +86,11 @@ class ShellHandler(BaseTerminalHandler):
         return [sys.executable, "-m", "jusi", "plugin-runtime"], ""
 
     def terminal_env(self) -> dict[str, str]:
-        env = os.environ.copy()
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in _TERMINAL_ENV_ALLOWLIST or key.startswith("JUSI_") or key.startswith("XDG_")
+        }
         env["TERM"] = os.environ.get("JUSI_SHELL_TERM", "").strip() or "xterm-256color"
         env["JUSI_PLUGIN_RUNTIME_CALLABLE"] = "jusi_shell.runner:run_shell_runner"
         env["JUSI_SHELL_PAYLOAD_JSON"] = json.dumps(self._payload or {"content": "", "meta": {}})
@@ -113,7 +135,7 @@ def display_handler_specs() -> tuple[DisplayHandlerSpec, ...]:
         DisplayHandlerSpec(
             handler_id="shell",
             factory=ShellHandler,
-            magic_commands=(MagicCommand("shell"),),
+            magic_commands=(MagicCommand("shell", bootstrap_body=ShellHandler.bootstrap_cell_body),),
             kernel_extension_modules=("jusi_shell.kernel",),
             presentation={"syntax": "sh", "indent": "sh", "followup": True, "completion": True},
         ),
