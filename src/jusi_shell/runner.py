@@ -59,6 +59,16 @@ def _read_winsize(fd: int) -> dict[str, int] | None:
     return {"rows": rows, "cols": cols, "xpixels": xpix, "ypixels": ypix}
 
 
+def _stream_fileno(stream: object) -> int | None:
+    fileno = getattr(stream, "fileno", None)
+    if not callable(fileno):
+        return None
+    try:
+        return int(fileno())
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _apply_winsize(fd: int, winsize: dict[str, int] | None) -> None:
     if not winsize:
         return
@@ -73,7 +83,10 @@ def _apply_winsize(fd: int, winsize: dict[str, int] | None) -> None:
 
 
 def _stdin_winsize() -> dict[str, int] | None:
-    for fd in (sys.stdin.fileno(), sys.stdout.fileno(), sys.stderr.fileno()):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        fd = _stream_fileno(stream)
+        if fd is None:
+            continue
         winsize = _read_winsize(fd)
         if winsize and winsize["rows"] > 0 and winsize["cols"] > 0:
             return winsize
@@ -429,9 +442,10 @@ class ShellRuntime:
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGQUIT, signal.SIG_DFL)
-            if target_winsize:
+            stdin_fd = _stream_fileno(sys.stdin)
+            if target_winsize and stdin_fd is not None:
                 try:
-                    _apply_winsize(sys.stdin.fileno(), target_winsize)
+                    _apply_winsize(stdin_fd, target_winsize)
                 except OSError:
                     pass
             env = self._prepare_shell_env()
@@ -451,8 +465,8 @@ class ShellRuntime:
             child_pid=self._child_pid,
             stdin_winsize=target_winsize,
             pty_winsize=_read_winsize(self.master_fd),
-            stdin_tty_mode=_tty_mode_flags(sys.stdin.fileno()),
-            stdout_tty_mode=_tty_mode_flags(sys.stdout.fileno()),
+            stdin_tty_mode=_tty_mode_flags(stdin_fd) if (stdin_fd := _stream_fileno(sys.stdin)) is not None else None,
+            stdout_tty_mode=_tty_mode_flags(stdout_fd) if (stdout_fd := _stream_fileno(sys.stdout)) is not None else None,
         )
         self._stdin_thread = threading.Thread(target=self._pump_stdin, daemon=True)
         self._stdin_thread.start()
@@ -460,7 +474,10 @@ class ShellRuntime:
             self.send_text(self.initial_text, source="initial")
 
     def _enter_raw_input_mode(self) -> None:
-        input_fd = sys.stdin.fileno()
+        input_fd = _stream_fileno(sys.stdin)
+        if input_fd is None:
+            _debug_log("stdin.raw_mode_unavailable", reason="missing_fileno")
+            return
         try:
             original = termios.tcgetattr(input_fd)
         except termios.error:
@@ -480,7 +497,11 @@ class ShellRuntime:
     def _restore_input_mode(self) -> None:
         if self._saved_stdin_mode is None:
             return
-        input_fd = sys.stdin.fileno()
+        input_fd = _stream_fileno(sys.stdin)
+        if input_fd is None:
+            _debug_log("stdin.raw_mode_restore_error", reason="missing_fileno")
+            self._saved_stdin_mode = None
+            return
         try:
             termios.tcsetattr(input_fd, termios.TCSANOW, self._saved_stdin_mode)
         except termios.error:
@@ -508,7 +529,10 @@ class ShellRuntime:
         self._previous_sigwinch = None
 
     def _pump_stdin(self) -> None:
-        input_fd = sys.stdin.fileno()
+        input_fd = _stream_fileno(sys.stdin)
+        if input_fd is None:
+            _debug_log("stdin.read_unavailable", reason="missing_fileno")
+            return
         while not self._stop.is_set() and self.master_fd >= 0:
             try:
                 chunk = os.read(input_fd, 4096)

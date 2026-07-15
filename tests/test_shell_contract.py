@@ -9,6 +9,7 @@ from jusi.infrastructure.runtime import JUSI_SESSION_CONFIG_ENV
 
 from jusi_shell.kernel import _session_config_from_env, load_ipython_extension
 from jusi_shell.plugin import SHELL_BOOTSTRAP_BODY, ShellHandler, display_handler_specs
+from jusi_shell import runner
 
 
 class FakeIPython:
@@ -81,6 +82,33 @@ class ShellContractTest(unittest.TestCase):
         self.assertEqual("/tmp/actions.jsonl", env["JUSI_PLUGIN_FRONTEND_ACTIONS_FILE"])
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         self.assertEqual({"content": "pwd", "meta": {"shell": "bash"}}, json.loads(env["JUSI_SHELL_PAYLOAD_JSON"]))
+
+    def test_runner_winsize_skips_captured_stderr_without_fileno(self) -> None:
+        class CapturedStderr:
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def flush(self) -> None:
+                return None
+
+        seen_fds = []
+
+        def fake_read_winsize(fd: int):
+            seen_fds.append(fd)
+            if fd == 222:
+                return {"rows": 24, "cols": 80, "xpixels": 0, "ypixels": 0}
+            return None
+
+        with patch.object(runner.sys, "stdin", type("Stream", (), {"fileno": lambda self: 111})()):
+            with patch.object(runner.sys, "stdout", type("Stream", (), {"fileno": lambda self: 222})()):
+                with patch.object(runner.sys, "stderr", CapturedStderr()):
+                    with patch.object(runner, "_read_winsize", fake_read_winsize):
+                        self.assertEqual(
+                            {"rows": 24, "cols": 80, "xpixels": 0, "ypixels": 0},
+                            runner._stdin_winsize(),
+                        )
+
+        self.assertEqual([111, 222], seen_fds)
 
 
 if __name__ == "__main__":
