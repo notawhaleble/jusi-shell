@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jusi-shell"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shell plugin for Jusi"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,11 +13,11 @@ authors = [
   { name = "Jusi contributors" }
 ]
 dependencies = [
-  "jusi",
+  "jusi>=1.0,<2",
 ]
 
-[project.entry-points."jusi.display_handlers"]
-shell = "jusi_shell.plugin:display_handler_specs"
+[project.entry-points."jusi.plugins.v1"]
+jusi_shell = "jusi_shell.catalog:catalog_entry"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jusi_shell"]

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 from typing import Any
 
 from IPython.core.error import UsageError
 
-from jusi.domain.models import JUSI_HANDLER_HANDOFF_MIME
-from jusi.infrastructure.runtime import JUSI_SESSION_CONFIG_ENV
+from . import __version__
 
-from .config import default_shell_from_config, shell_config_from_session
+
+HANDOFF_MIME = "application/vnd.jusi.handoff.v1+json"
+_runtime_configuration: dict[str, Any] = {}
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -21,8 +21,29 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(prog="%%shell", add_help=False)
+    parser.add_argument("-C", "--cwd", default="")
     parser.add_argument("shell_name", nargs="?", default="")
     return parser
+
+
+def jusi_kernel_adapter_v1() -> dict[str, object]:
+    return {
+        "plugin_id": "jusi_shell",
+        "plugin_version": __version__,
+        "families": [{"family_id": "shell", "magic_name": "shell"}],
+    }
+
+
+def configure_jusi_runtime_v1(configuration: dict[str, Any]) -> None:
+    global _runtime_configuration
+    _runtime_configuration = dict(configuration)
+
+
+def _default_shell() -> str:
+    shell = _runtime_configuration.get("shell")
+    if not isinstance(shell, dict):
+        return ""
+    return str(shell.get("default", shell.get("default_shell", ""))).strip()
 
 
 def load_ipython_extension(ipython: Any) -> None:
@@ -34,35 +55,19 @@ def load_ipython_extension(ipython: Any) -> None:
         from IPython.display import display
 
         args = _parser().parse_args(shlex.split(line))
-        session_config = _session_config_from_env()
-        shell_name = str(args.shell_name or "").strip()
-        if not shell_name:
-            shell_name = default_shell_from_config(shell_config_from_session(session_config))
-        meta = {
-            "shell": shell_name,
-            "line": line,
-        }
+        shell_name = str(args.shell_name or "").strip() or _default_shell()
+        cwd = str(args.cwd or "").strip()
+        if cwd:
+            cwd = os.path.abspath(os.path.expanduser(cwd))
         payload = {
-            "handler_id": "shell",
+            "protocol_version": 1,
+            "kind": "plugin.handoff",
+            "plugin_id": "jusi_shell",
+            "plugin_version": __version__,
+            "family_id": "shell",
             "magic_name": "shell",
-            "content": str(cell or ""),
-            "meta": meta,
+            "payload": {"shell": shell_name, "cwd": cwd, "body": str(cell or "")},
         }
-        display(
-            {JUSI_HANDLER_HANDOFF_MIME: payload},
-            raw=True,
-            metadata={JUSI_HANDLER_HANDOFF_MIME: meta},
-        )
+        display({HANDOFF_MIME: payload}, raw=True)
 
     ipython.register_magic_function(_jusi_shell_magic, magic_kind="cell", magic_name="shell")
-
-
-def _session_config_from_env() -> dict[str, object]:
-    raw = os.environ.get(JUSI_SESSION_CONFIG_ENV, "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return dict(parsed) if isinstance(parsed, dict) else {}

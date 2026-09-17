@@ -1,3 +1,5 @@
-from .plugin import ShellHandler, display_handler_specs
+"""Jusi 1.0 interactive shell plugin."""
 
-__all__ = ["ShellHandler", "display_handler_specs"]
+__version__ = "0.2.0"
+
+__all__ = ["__version__"]
